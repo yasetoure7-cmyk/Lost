@@ -1,0 +1,6 @@
+{
+  "name": "Lost Earth",
+  "description": "Offline realistic 3D tactical zombie survival shooter. Switch between 3rd-person and 1st-person views, customize armor, recruit a warrior squad, reclaim ruined cities, and rebuild human civilization.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

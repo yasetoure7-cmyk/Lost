@@ -228,7 +228,7 @@ fun MainMenuScreen(
                         )
                     }
                     Text(
-                        text = "CONTROLS: Right Screen = Movement • Left Screen = Aim, Weapons & Tactical Gear",
+                        text = "CONTROLS: Left Screen = 360° Movement • Right Screen = All-Angle Aim, Weapons & Tactical Gear",
                         style = MaterialTheme.typography.labelSmall,
                         color = TextSecondary,
                         fontSize = 10.sp

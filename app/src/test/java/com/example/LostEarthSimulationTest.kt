@@ -75,6 +75,16 @@ class LostEarthSimulationTest {
         repeat(10) { engine.stepSimulation(0.03f) }
         assertTrue(engine.playerZ < startZ)
 
+        // Move diagonally while simultaneously aiming 360° horizontally and looking up
+        val beforeX = engine.playerX
+        val beforeZ = engine.playerZ
+        engine.inputMoveX = 0.7f
+        engine.inputMoveY = -0.7f
+        engine.applyAimDelta(-450f, -250f)
+        engine.stepSimulation(0.03f)
+        assertTrue(engine.playerX != beforeX || engine.playerZ != beforeZ)
+        assertTrue(engine.playerPitch > 0.5f)
+
         engine.health = 45
         engine.useTacticalGear(TacticalGearType.MED_STIM)
         engine.stepSimulation(0.02f)

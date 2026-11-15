@@ -8,7 +8,6 @@ import android.opengl.Matrix
 import com.example.data.ArmorLoadout
 import com.example.data.PlayerStance
 import com.example.data.WeaponType
-import java.nio.FloatBuffer
 import javax.microedition.khronos.egl.EGLConfig
 import javax.microedition.khronos.opengles.GL10
 
@@ -32,7 +31,7 @@ class ArmoryPreviewRenderer : GLSurfaceView.Renderer {
     private var flashPosHandle = 0
     private var flashStrengthHandle = 0
 
-    private lateinit var cubeBuffer: FloatBuffer
+    private lateinit var meshes: GlMeshBuffers
     private lateinit var textures: TextureAtlas
     private lateinit var humanRenderer: HumanoidMeshRenderer
 
@@ -67,9 +66,9 @@ class ArmoryPreviewRenderer : GLSurfaceView.Renderer {
         flashPosHandle = GLES20.glGetUniformLocation(program, "uFlashPos")
         flashStrengthHandle = GLES20.glGetUniformLocation(program, "uFlashStrength")
 
-        cubeBuffer = LostEarthGlRenderer.buildUnitCubeBuffer()
+        meshes = GlMeshBuffers()
         textures = TextureAtlas().apply { initTextures() }
-        humanRenderer = HumanoidMeshRenderer(::drawBox, textures)
+        humanRenderer = HumanoidMeshRenderer(::drawShape, textures)
         lastNs = System.nanoTime()
     }
 
@@ -97,23 +96,12 @@ class ArmoryPreviewRenderer : GLSurfaceView.Renderer {
         GLES20.glUniform3f(flashPosHandle, 1.5f, 2.2f, -2.0f)
         GLES20.glUniform1f(flashStrengthHandle, 0.25f)
 
-        val stride = 8 * 4
-        cubeBuffer.position(0)
-        GLES20.glEnableVertexAttribArray(posHandle)
-        GLES20.glVertexAttribPointer(posHandle, 3, GLES20.GL_FLOAT, false, stride, cubeBuffer)
-        cubeBuffer.position(3)
-        GLES20.glEnableVertexAttribArray(normHandle)
-        GLES20.glVertexAttribPointer(normHandle, 3, GLES20.GL_FLOAT, false, stride, cubeBuffer)
-        cubeBuffer.position(6)
-        GLES20.glEnableVertexAttribArray(uvHandle)
-        GLES20.glVertexAttribPointer(uvHandle, 2, GLES20.GL_FLOAT, false, stride, cubeBuffer)
-
-        // Armory Turntable Platform
+        // Round Armory Turntable Pedestal
         Matrix.setIdentityM(pedestalMat, 0)
         Matrix.translateM(pedestalMat, 0, 0f, -0.08f, 0f)
         Matrix.rotateM(pedestalMat, 0, rotationDeg, 0f, 1f, 0f)
-        Matrix.scaleM(pedestalMat, 0, 1.5f, 0.14f, 1.5f)
-        drawBox(pedestalMat, textures.metalTex, 0xFF28323E, 1f, 1f, 0.05f, 0.7f)
+        Matrix.scaleM(pedestalMat, 0, 1.6f, 0.14f, 1.6f)
+        drawShape(MeshShape.CYLINDER, pedestalMat, textures.metalTex, 0xFF28323E, 1f, 1f, 0.05f, 0.75f)
 
         humanRenderer.drawHumanSoldier(
             x = 0f,
@@ -132,7 +120,8 @@ class ArmoryPreviewRenderer : GLSurfaceView.Renderer {
         )
     }
 
-    private fun drawBox(
+    private fun drawShape(
+        shape: MeshShape,
         model: FloatArray,
         texId: Int,
         colorHex: Long,
@@ -141,6 +130,23 @@ class ArmoryPreviewRenderer : GLSurfaceView.Renderer {
         emissive: Float,
         specular: Float
     ) {
+        val (buf, count) = when (shape) {
+            MeshShape.CUBE -> meshes.cubeBuffer to meshes.cubeVertexCount
+            MeshShape.CYLINDER -> meshes.cylinderBuffer to meshes.cylinderVertexCount
+            MeshShape.CONE -> meshes.coneBuffer to meshes.coneVertexCount
+            MeshShape.SPHERE -> meshes.sphereBuffer to meshes.sphereVertexCount
+        }
+        val stride = 8 * 4
+        buf.position(0)
+        GLES20.glEnableVertexAttribArray(posHandle)
+        GLES20.glVertexAttribPointer(posHandle, 3, GLES20.GL_FLOAT, false, stride, buf)
+        buf.position(3)
+        GLES20.glEnableVertexAttribArray(normHandle)
+        GLES20.glVertexAttribPointer(normHandle, 3, GLES20.GL_FLOAT, false, stride, buf)
+        buf.position(6)
+        GLES20.glEnableVertexAttribArray(uvHandle)
+        GLES20.glVertexAttribPointer(uvHandle, 2, GLES20.GL_FLOAT, false, stride, buf)
+
         Matrix.multiplyMM(mvpMatrix, 0, vpMatrix, 0, model, 0)
         GLES20.glUniformMatrix4fv(mvpHandle, 1, false, mvpMatrix, 0)
         GLES20.glUniformMatrix4fv(modelHandle, 1, false, model, 0)
@@ -158,7 +164,7 @@ class ArmoryPreviewRenderer : GLSurfaceView.Renderer {
         GLES20.glUniform2f(uvScaleHandle, uvScaleX, uvScaleY)
         GLES20.glUniform1f(emissiveHandle, emissive)
         GLES20.glUniform1f(specHandle, specular)
-        GLES20.glDrawArrays(GLES20.GL_TRIANGLES, 0, 36)
+        GLES20.glDrawArrays(GLES20.GL_TRIANGLES, 0, count)
     }
 }
 

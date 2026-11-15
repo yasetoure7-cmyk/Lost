@@ -6,6 +6,7 @@ import android.graphics.Color
 import android.graphics.Paint
 import android.opengl.GLES20
 import android.opengl.GLUtils
+import kotlin.math.sin
 import kotlin.random.Random
 
 class TextureAtlas {
@@ -20,14 +21,14 @@ class TextureAtlas {
     var whiteTex = 0
 
     fun initTextures() {
-        terrainTex = uploadBitmap(createNoiseTexture(128, Color.rgb(66, 72, 58), Color.rgb(48, 52, 42), 16, gridLines = false))
-        asphaltTex = uploadBitmap(createAsphaltTexture(128))
-        concreteTex = uploadBitmap(createNoiseTexture(128, Color.rgb(112, 114, 118), Color.rgb(86, 88, 94), 22, gridLines = true))
-        windowTex = uploadBitmap(createSkyscraperTexture(128))
-        metalTex = uploadBitmap(createCorrugatedTexture(128))
-        woodTex = uploadBitmap(createPlankTexture(128))
-        foliageTex = uploadBitmap(createNoiseTexture(64, Color.rgb(46, 78, 42), Color.rgb(28, 52, 26), 28, gridLines = false))
-        fabricTex = uploadBitmap(createNoiseTexture(64, Color.rgb(210, 214, 220), Color.rgb(185, 190, 198), 10, gridLines = false))
+        terrainTex = uploadBitmap(createTerrainTexture(256))
+        asphaltTex = uploadBitmap(createAsphaltTexture(256))
+        concreteTex = uploadBitmap(createConcreteTexture(256))
+        windowTex = uploadBitmap(createSkyscraperTexture(256))
+        metalTex = uploadBitmap(createCorrugatedTexture(256))
+        woodTex = uploadBitmap(createPlankTexture(256))
+        foliageTex = uploadBitmap(createFoliageTexture(128))
+        fabricTex = uploadBitmap(createTacticalWeaveTexture(128))
         whiteTex = uploadBitmap(createSolidWhiteTexture())
     }
 
@@ -37,57 +38,85 @@ class TextureAtlas {
         return bmp
     }
 
-    private fun createNoiseTexture(
-        size: Int,
-        c1: Int,
-        c2: Int,
-        jitter: Int,
-        gridLines: Boolean
-    ): Bitmap {
+    private fun createTerrainTexture(size: Int): Bitmap {
         val bmp = Bitmap.createBitmap(size, size, Bitmap.Config.ARGB_8888)
-        val rng = Random(42)
-        val r1 = Color.red(c1); val g1 = Color.green(c1); val b1 = Color.blue(c1)
-        val r2 = Color.red(c2); val g2 = Color.green(c2); val b2 = Color.blue(c2)
+        val rng = Random(101)
         for (y in 0 until size) {
             for (x in 0 until size) {
-                val mix = rng.nextFloat()
-                val n = rng.nextInt(-jitter, jitter + 1)
-                var r = (r1 * mix + r2 * (1f - mix)).toInt() + n
-                var g = (g1 * mix + g2 * (1f - mix)).toInt() + n
-                var b = (b1 * mix + b2 * (1f - mix)).toInt() + n
-                if (gridLines && (x % 32 == 0 || y % 32 == 0)) {
-                    r -= 18; g -= 18; b -= 18
-                }
-                bmp.setPixel(x, y, Color.rgb(r.coerceIn(0, 255), g.coerceIn(0, 255), b.coerceIn(0, 255)))
+                val wave = (sin(x * 0.08) * sin(y * 0.08)).toFloat()
+                val patch = (wave + 1f) * 0.5f
+                val n = rng.nextInt(-14, 15)
+                val r = (54 * patch + 74 * (1f - patch) + n).toInt().coerceIn(0, 255)
+                val g = (66 * patch + 68 * (1f - patch) + n).toInt().coerceIn(0, 255)
+                val b = (42 * patch + 52 * (1f - patch) + n).toInt().coerceIn(0, 255)
+                bmp.setPixel(x, y, Color.rgb(r, g, b))
+            }
+        }
+        return bmp
+    }
+
+    private fun createConcreteTexture(size: Int): Bitmap {
+        val bmp = Bitmap.createBitmap(size, size, Bitmap.Config.ARGB_8888)
+        val rng = Random(42)
+        for (y in 0 until size) {
+            for (x in 0 until size) {
+                val n = rng.nextInt(-18, 19)
+                var v = 104 + n
+                if (x % 64 == 0 || y % 64 == 0) v -= 24
+                if ((x + y) % 97 == 0 && rng.nextFloat() < 0.4f) v -= 30
+                val c = v.coerceIn(20, 220)
+                bmp.setPixel(x, y, Color.rgb(c, c + 1, c + 3))
             }
         }
         return bmp
     }
 
     private fun createAsphaltTexture(size: Int): Bitmap {
-        val bmp = createNoiseTexture(size, Color.rgb(54, 58, 64), Color.rgb(42, 45, 50), 12, gridLines = false)
+        val bmp = Bitmap.createBitmap(size, size, Bitmap.Config.ARGB_8888)
+        val rng = Random(202)
+        for (y in 0 until size) {
+            for (x in 0 until size) {
+                val grit = rng.nextInt(-12, 13)
+                val v = (46 + grit).coerceIn(18, 90)
+                bmp.setPixel(x, y, Color.rgb(v, v + 2, v + 5))
+            }
+        }
         val canvas = Canvas(bmp)
         val lanePaint = Paint().apply {
-            color = Color.rgb(198, 162, 68)
+            color = Color.rgb(196, 158, 64)
+            strokeWidth = 6f
+        }
+        canvas.drawLine(size * 0.5f, 8f, size * 0.5f, size * 0.36f, lanePaint)
+        canvas.drawLine(size * 0.5f, size * 0.58f, size * 0.5f, size * 0.90f, lanePaint)
+        val edgePaint = Paint().apply {
+            color = Color.rgb(125, 130, 136)
             strokeWidth = 4f
         }
-        canvas.drawLine(size * 0.5f, 4f, size * 0.5f, size * 0.35f, lanePaint)
-        canvas.drawLine(size * 0.5f, size * 0.6f, size * 0.5f, size * 0.92f, lanePaint)
+        canvas.drawLine(8f, 0f, 8f, size.toFloat(), edgePaint)
+        canvas.drawLine(size - 8f, 0f, size - 8f, size.toFloat(), edgePaint)
         return bmp
     }
 
     private fun createSkyscraperTexture(size: Int): Bitmap {
-        val bmp = createNoiseTexture(size, Color.rgb(88, 92, 100), Color.rgb(66, 70, 76), 12, gridLines = false)
+        val bmp = createConcreteTexture(size)
         val canvas = Canvas(bmp)
         val rng = Random(99)
-        val glassDark = Paint().apply { color = Color.rgb(22, 30, 40) }
-        val glassAmber = Paint().apply { color = Color.rgb(88, 72, 45) }
+        val framePaint = Paint().apply { color = Color.rgb(42, 46, 54) }
+        val glassDark = Paint().apply { color = Color.rgb(18, 26, 36) }
+        val glassReflect = Paint().apply { color = Color.rgb(52, 68, 84) }
+        val glassAmber = Paint().apply { color = Color.rgb(120, 86, 42) }
+        val step = size / 4
         for (row in 0 until 4) {
             for (col in 0 until 4) {
-                val left = col * 32f + 5f
-                val top = row * 32f + 6f
-                val p = if (rng.nextFloat() < 0.16f) glassAmber else glassDark
-                canvas.drawRect(left, top, left + 22f, top + 19f, p)
+                val left = col * step + 7f
+                val top = row * step + 8f
+                canvas.drawRect(left - 2f, top - 2f, left + step - 12f, top + step - 16f, framePaint)
+                val p = when {
+                    rng.nextFloat() < 0.14f -> glassAmber
+                    rng.nextFloat() < 0.35f -> glassReflect
+                    else -> glassDark
+                }
+                canvas.drawRect(left, top, left + step - 14f, top + step - 18f, p)
             }
         }
         return bmp
@@ -98,10 +127,13 @@ class TextureAtlas {
         val rng = Random(77)
         for (y in 0 until size) {
             for (x in 0 until size) {
-                val rib = if ((x / 6) % 2 == 0) 20 else -18
-                val rust = if (rng.nextFloat() < 0.08f) 16 else 0
-                val v = (175 + rib + rng.nextInt(-10, 11)).coerceIn(0, 255)
-                bmp.setPixel(x, y, Color.rgb((v + rust).coerceAtMost(255), v, (v - rust / 2).coerceAtLeast(0)))
+                val rib = (sin(x * 0.42) * 26.0).toInt()
+                val rust = if (rng.nextFloat() < 0.09f) 22 else 0
+                val v = (172 + rib + rng.nextInt(-10, 11)).coerceIn(0, 255)
+                bmp.setPixel(
+                    x, y,
+                    Color.rgb((v + rust).coerceAtMost(255), v, (v - rust / 2).coerceAtLeast(0))
+                )
             }
         }
         return bmp
@@ -111,17 +143,45 @@ class TextureAtlas {
         val bmp = Bitmap.createBitmap(size, size, Bitmap.Config.ARGB_8888)
         val rng = Random(17)
         for (y in 0 until size) {
-            val seam = (y % 21 == 0)
+            val seam = (y % 32 == 0)
             for (x in 0 until size) {
-                val grain = rng.nextInt(-12, 13)
-                val baseR = if (seam) 55 else 128 + grain
-                val baseG = if (seam) 42 else 96 + grain
-                val baseB = if (seam) 30 else 66 + grain
+                val grain = rng.nextInt(-10, 11) + (sin(x * 0.25 + y * 0.05) * 8.0).toInt()
+                val baseR = if (seam) 48 else 132 + grain
+                val baseG = if (seam) 36 else 98 + grain
+                val baseB = if (seam) 24 else 68 + grain
                 bmp.setPixel(
-                    x,
-                    y,
+                    x, y,
                     Color.rgb(baseR.coerceIn(0, 255), baseG.coerceIn(0, 255), baseB.coerceIn(0, 255))
                 )
+            }
+        }
+        return bmp
+    }
+
+    private fun createFoliageTexture(size: Int): Bitmap {
+        val bmp = Bitmap.createBitmap(size, size, Bitmap.Config.ARGB_8888)
+        val rng = Random(55)
+        for (y in 0 until size) {
+            for (x in 0 until size) {
+                val n = rng.nextInt(-22, 23)
+                val r = (40 + n).coerceIn(10, 100)
+                val g = (68 + n).coerceIn(22, 130)
+                val b = (34 + n).coerceIn(10, 80)
+                bmp.setPixel(x, y, Color.rgb(r, g, b))
+            }
+        }
+        return bmp
+    }
+
+    private fun createTacticalWeaveTexture(size: Int): Bitmap {
+        val bmp = Bitmap.createBitmap(size, size, Bitmap.Config.ARGB_8888)
+        val rng = Random(88)
+        for (y in 0 until size) {
+            for (x in 0 until size) {
+                val weave = if (((x / 3) + (y / 3)) % 2 == 0) 10 else -10
+                val n = rng.nextInt(-6, 7)
+                val v = (204 + weave + n).coerceIn(140, 245)
+                bmp.setPixel(x, y, Color.rgb(v, v, v))
             }
         }
         return bmp

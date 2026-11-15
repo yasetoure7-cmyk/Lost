@@ -4,7 +4,10 @@ import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
-import androidx.compose.foundation.gestures.detectDragGestures
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
+import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.ui.unit.IntSize
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -416,39 +419,46 @@ fun MovementThumbstick(
     modifier: Modifier = Modifier
 ) {
     var knobOffset by remember { mutableStateOf(Offset.Zero) }
-    val maxRadiusPx = 95f
+    var boxSize by remember { mutableStateOf(IntSize.Zero) }
 
     Box(
         modifier = modifier
-            .size(132.dp)
+            .size(138.dp)
             .clip(CircleShape)
             .background(TacticalObsidian.copy(alpha = 0.45f))
             .border(2.dp, AmberTactical.copy(alpha = 0.55f), CircleShape)
+            .onSizeChanged { boxSize = it }
             .pointerInput(Unit) {
-                detectDragGestures(
-                    onDragStart = { },
-                    onDragEnd = {
-                        knobOffset = Offset.Zero
-                        onMoveVectorChanged(0f, 0f)
-                    },
-                    onDragCancel = {
-                        knobOffset = Offset.Zero
-                        onMoveVectorChanged(0f, 0f)
-                    },
-                    onDrag = { change, dragAmount ->
-                        change.consume()
-                        val raw = knobOffset + dragAmount
+                awaitEachGesture {
+                    val down = awaitFirstDown(requireUnconsumed = false)
+                    val pid = down.id
+                    fun updateFromPos(pos: Offset) {
+                        val cx = boxSize.width * 0.5f
+                        val cy = boxSize.height * 0.5f
+                        val maxR = (minOf(boxSize.width, boxSize.height) * 0.38f).coerceAtLeast(36f)
+                        val raw = Offset(pos.x - cx, pos.y - cy)
                         val len = hypot(raw.x, raw.y)
-                        val clamped = if (len > maxRadiusPx) {
-                            Offset(raw.x / len * maxRadiusPx, raw.y / len * maxRadiusPx)
-                        } else raw
+                        val clamped = if (len > maxR) Offset(raw.x / len * maxR, raw.y / len * maxR) else raw
                         knobOffset = clamped
-                        // Forward on screen is -Y, so invert Y for forward movement (+1)
-                        onMoveVectorChanged(clamped.x / maxRadiusPx, -clamped.y / maxRadiusPx)
+                        onMoveVectorChanged(clamped.x / maxR, -clamped.y / maxR)
                     }
-                )
+                    updateFromPos(down.position)
+                    down.consume()
+                    try {
+                        while (true) {
+                            val event = awaitPointerEvent()
+                            val change = event.changes.firstOrNull { it.id == pid } ?: break
+                            if (!change.pressed) break
+                            updateFromPos(change.position)
+                            change.consume()
+                        }
+                    } finally {
+                        knobOffset = Offset.Zero
+                        onMoveVectorChanged(0f, 0f)
+                    }
+                }
             }
-            .testTag("right_movement_joystick"),
+            .testTag("left_movement_joystick"),
         contentAlignment = Alignment.Center
     ) {
         Canvas(modifier = Modifier.fillMaxSize()) {
@@ -459,15 +469,15 @@ fun MovementThumbstick(
                 center = center,
                 style = Stroke(width = 2f)
             )
-            val knobPos = Offset(center.x + knobOffset.x * 0.5f, center.y + knobOffset.y * 0.5f)
+            val knobPos = Offset(center.x + knobOffset.x, center.y + knobOffset.y)
             drawCircle(
                 color = AmberTactical.copy(alpha = 0.85f),
-                radius = 24.dp.toPx(),
+                radius = 23.dp.toPx(),
                 center = knobPos
             )
             drawCircle(
                 color = TacticalObsidian,
-                radius = 12.dp.toPx(),
+                radius = 11.dp.toPx(),
                 center = knobPos
             )
         }

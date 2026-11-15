@@ -6,7 +6,6 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
-import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -39,7 +38,6 @@ import androidx.compose.material.icons.filled.South
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
@@ -57,12 +55,14 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.input.pointer.positionChange
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import com.example.data.TacticalGearType
+import com.example.data.WeaponType
 import com.example.game.GameEngine
 import com.example.game.HudState
 import com.example.game.LostEarthGLSurfaceView
@@ -93,20 +93,43 @@ fun GameCombatScreen(
             modifier = Modifier.fillMaxSize()
         )
 
-        // Left-side Aim Touch-Drag Area (Left Side Manages Aim, Weapon Selection & Tactical Gear)
+        // RIGHT-SIDE FULL-HEIGHT AIM TOUCH ZONE (supports simultaneous aiming while left thumb moves!)
         Box(
             modifier = Modifier
                 .fillMaxHeight()
-                .fillMaxWidth(0.55f)
-                .align(Alignment.CenterStart)
+                .fillMaxWidth(0.58f)
+                .align(Alignment.CenterEnd)
                 .pointerInput(Unit) {
-                    detectDragGestures { change, dragAmount ->
-                        change.consume()
-                        engine.applyAimDelta(dragAmount.x, dragAmount.y)
+                    awaitEachGesture {
+                        val down = awaitFirstDown(requireUnconsumed = false)
+                        val pid = down.id
+                        while (true) {
+                            val event = awaitPointerEvent()
+                            val change = event.changes.firstOrNull { it.id == pid } ?: break
+                            if (!change.pressed) break
+                            val delta = change.positionChange()
+                            if (delta != Offset.Zero) {
+                                engine.applyAimDelta(delta.x, delta.y)
+                                change.consume()
+                            }
+                        }
                     }
                 }
-                .testTag("left_aim_pad")
+                .testTag("right_aim_pad")
         )
+
+        // Sniper Scope Vignette when ADS with SR-25 Sentinel
+        if (hud.isAds && hud.weapons.getOrNull(hud.activeSlot) == WeaponType.MARKSMAN_SNIPER) {
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .background(
+                        Brush.radialGradient(
+                            colors = listOf(Color.Transparent, Color.Transparent, TacticalObsidian.copy(alpha = 0.85f))
+                        )
+                    )
+            )
+        }
 
         // Low-health & Damage Crimson Vignette
         if (hud.damageFlash > 0f || hud.health < 35) {
@@ -122,13 +145,46 @@ fun GameCombatScreen(
             )
         }
 
-        // Center Dynamic Tactical Crosshair & Hitmarkers
+        // Center Dynamic Tactical Crosshair, Hitmarkers & Target Readout
         Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-            CrosshairOverlay(
-                isAds = hud.isAds,
-                hitMarker = hud.hitMarkerActive,
-                headshot = hud.hitMarkerHeadshot
-            )
+            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                CrosshairOverlay(
+                    isAds = hud.isAds,
+                    hitMarker = hud.hitMarkerActive,
+                    headshot = hud.hitMarkerHeadshot,
+                    hasTarget = hud.targetEnemyName != null
+                )
+                if (hud.targetEnemyName != null) {
+                    Spacer(Modifier.height(6.dp))
+                    Surface(
+                        color = TacticalObsidian.copy(alpha = 0.72f),
+                        shape = RoundedCornerShape(4.dp),
+                        border = BorderStroke(1.dp, CrimsonThreat.copy(alpha = 0.7f))
+                    ) {
+                        Column(
+                            modifier = Modifier
+                                .width(126.dp)
+                                .padding(horizontal = 6.dp, vertical = 3.dp),
+                            horizontalAlignment = Alignment.CenterHorizontally
+                        ) {
+                            Text(
+                                text = hud.targetEnemyName.uppercase(),
+                                style = MaterialTheme.typography.labelSmall,
+                                color = CrimsonThreat,
+                                fontSize = 9.sp
+                            )
+                            LinearProgressIndicator(
+                                progress = { hud.targetEnemyHpFrac },
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .height(3.dp),
+                                color = CrimsonThreat,
+                                trackColor = GunmetalSurface
+                            )
+                        }
+                    }
+                }
+            }
         }
 
         // Safe-area Tactical HUD Overlay
@@ -152,7 +208,6 @@ fun GameCombatScreen(
                     modifier = Modifier.size(width = 165.dp, height = 112.dp)
                 )
 
-                // Center Comms & Outpost Capture Progress
                 Column(
                     modifier = Modifier
                         .weight(1f)
@@ -215,7 +270,7 @@ fun GameCombatScreen(
                     }
                 }
 
-                // Top-Right: Health & Armor Cluster + 1st/3rd Person Toggle + Menu
+                // Top-Right: Health & Armor Cluster + 1st/3rd Person Toggle + HQ Menu
                 Row(
                     horizontalArrangement = Arrangement.spacedBy(8.dp),
                     verticalAlignment = Alignment.Top
@@ -305,15 +360,97 @@ fun GameCombatScreen(
             }
 
             // =========================================================================
-            // LEFT SIDE: AIM, FIRE, ADS, WEAPON SELECTION & TACTICAL GEAR
+            // LEFT SIDE: 360-DEGREE MOVEMENT THUMBSTICK, SPRINT, CROUCH & JUMP
             // =========================================================================
-            Column(
+            Row(
                 modifier = Modifier
                     .align(Alignment.BottomStart)
                     .padding(bottom = 2.dp),
+                verticalAlignment = Alignment.Bottom,
+                horizontalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                MovementThumbstick(
+                    onMoveVectorChanged = { mx, my ->
+                        engine.inputMoveX = mx
+                        engine.inputMoveY = my
+                    }
+                )
+
+                Column(
+                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally
+                ) {
+                    Surface(
+                        onClick = { engine.triggerJump() },
+                        color = TacticalObsidian.copy(alpha = 0.78f),
+                        shape = CircleShape,
+                        border = BorderStroke(1.dp, TacticalBorder),
+                        modifier = Modifier
+                            .size(48.dp)
+                            .testTag("left_jump_button")
+                    ) {
+                        Box(contentAlignment = Alignment.Center) {
+                            Icon(Icons.Filled.ArrowUpward, contentDescription = "Jump", tint = TextPrimary)
+                        }
+                    }
+
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Surface(
+                            onClick = {
+                                engine.inputSprint = !engine.inputSprint
+                                if (engine.inputSprint) engine.inputCrouch = false
+                            },
+                            color = if (hud.isSprinting) AmberTactical.copy(alpha = 0.35f) else TacticalObsidian.copy(alpha = 0.78f),
+                            shape = CircleShape,
+                            border = BorderStroke(1.dp, if (hud.isSprinting) AmberTactical else TacticalBorder),
+                            modifier = Modifier
+                                .size(48.dp)
+                                .testTag("left_sprint_button")
+                        ) {
+                            Box(contentAlignment = Alignment.Center) {
+                                Icon(
+                                    Icons.Filled.DirectionsRun,
+                                    contentDescription = "Sprint Lock",
+                                    tint = if (hud.isSprinting) AmberTactical else TextPrimary
+                                )
+                            }
+                        }
+
+                        Surface(
+                            onClick = {
+                                engine.inputCrouch = !engine.inputCrouch
+                                if (engine.inputCrouch) engine.inputSprint = false
+                            },
+                            color = if (hud.isCrouching) AmberTactical.copy(alpha = 0.35f) else TacticalObsidian.copy(alpha = 0.78f),
+                            shape = CircleShape,
+                            border = BorderStroke(1.dp, if (hud.isCrouching) AmberTactical else TacticalBorder),
+                            modifier = Modifier
+                                .size(48.dp)
+                                .testTag("left_crouch_button")
+                        ) {
+                            Box(contentAlignment = Alignment.Center) {
+                                Icon(
+                                    Icons.Filled.South,
+                                    contentDescription = "Crouch",
+                                    tint = if (hud.isCrouching) AmberTactical else TextPrimary
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+
+            // =========================================================================
+            // RIGHT SIDE: AIM, FIRE-WHILE-AIMING, ADS, WEAPON SELECTION & TACTICAL GEAR
+            // =========================================================================
+            Column(
+                modifier = Modifier
+                    .align(Alignment.BottomEnd)
+                    .padding(bottom = 2.dp),
+                horizontalAlignment = Alignment.End,
                 verticalArrangement = Arrangement.spacedBy(8.dp)
             ) {
-                // Tactical Gear Bar (Frag, Med-Stim, Shock Flare)
+                // Tactical Gear Bar (Frag, Med-Stim, Shock Flare) on RIGHT side
                 Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                     TacticalGearChip(
                         icon = Icons.Filled.LocalFireDepartment,
@@ -341,11 +478,30 @@ fun GameCombatScreen(
                     )
                 }
 
-                // Weapon Selection Slots + Ammo Readout + Reload
+                // Weapon Selection Slots + Ammo Readout + Reload on RIGHT side
                 Row(
                     horizontalArrangement = Arrangement.spacedBy(6.dp),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
+                    Surface(
+                        onClick = { engine.triggerReload() },
+                        color = TacticalObsidian.copy(alpha = 0.8f),
+                        shape = CircleShape,
+                        border = BorderStroke(1.dp, if (hud.isReloading) AmberTactical else TacticalBorder),
+                        modifier = Modifier
+                            .size(48.dp)
+                            .testTag("reload_button")
+                    ) {
+                        Box(contentAlignment = Alignment.Center) {
+                            Icon(
+                                Icons.Filled.Refresh,
+                                contentDescription = "Reload",
+                                tint = if (hud.isReloading) AmberTactical else TextPrimary,
+                                modifier = Modifier.size(20.dp)
+                            )
+                        }
+                    }
+
                     hud.weapons.forEachIndexed { idx, w ->
                         val active = idx == hud.activeSlot
                         Surface(
@@ -376,71 +532,13 @@ fun GameCombatScreen(
                             }
                         }
                     }
-
-                    // Reload Button
-                    Surface(
-                        onClick = { engine.triggerReload() },
-                        color = TacticalObsidian.copy(alpha = 0.8f),
-                        shape = CircleShape,
-                        border = BorderStroke(1.dp, if (hud.isReloading) AmberTactical else TacticalBorder),
-                        modifier = Modifier
-                            .size(48.dp)
-                            .testTag("reload_button")
-                    ) {
-                        Box(contentAlignment = Alignment.Center) {
-                            Icon(
-                                Icons.Filled.Refresh,
-                                contentDescription = "Reload",
-                                tint = if (hud.isReloading) AmberTactical else TextPrimary,
-                                modifier = Modifier.size(20.dp)
-                            )
-                        }
-                    }
                 }
 
-                // Fire Trigger (Hold to Shoot) + ADS Scope Toggle on LEFT side
+                // ADS Scope Toggle + Hold-to-Fire & Aim Button on RIGHT side
                 Row(
                     horizontalArrangement = Arrangement.spacedBy(10.dp),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    // Hold-to-Fire Tactical Trigger
-                    Box(
-                        modifier = Modifier
-                            .size(76.dp)
-                            .clip(CircleShape)
-                            .background(CrimsonThreat.copy(alpha = 0.72f))
-                            .border(2.5.dp, AmberTactical, CircleShape)
-                            .pointerInput(Unit) {
-                                awaitEachGesture {
-                                    awaitFirstDown(requireUnconsumed = false)
-                                    engine.inputFiring = true
-                                    do {
-                                        val event = awaitPointerEvent()
-                                    } while (event.changes.any { it.pressed })
-                                    engine.inputFiring = false
-                                }
-                            }
-                            .testTag("left_fire_button"),
-                        contentAlignment = Alignment.Center
-                    ) {
-                        Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                            Icon(
-                                Icons.Filled.MyLocation,
-                                contentDescription = "Fire Weapon",
-                                tint = TextPrimary,
-                                modifier = Modifier.size(26.dp)
-                            )
-                            Text(
-                                text = "FIRE",
-                                style = MaterialTheme.typography.labelSmall,
-                                color = TextPrimary,
-                                fontSize = 9.sp,
-                                fontWeight = FontWeight.Bold
-                            )
-                        }
-                    }
-
-                    // ADS Aim Scope Toggle
                     Surface(
                         onClick = { engine.inputAds = !engine.inputAds },
                         color = if (hud.isAds) AmberTactical.copy(alpha = 0.35f) else TacticalObsidian.copy(alpha = 0.78f),
@@ -448,7 +546,7 @@ fun GameCombatScreen(
                         border = BorderStroke(1.5.dp, if (hud.isAds) AmberTactical else TacticalBorder),
                         modifier = Modifier
                             .size(56.dp)
-                            .testTag("left_ads_button")
+                            .testTag("right_ads_button")
                     ) {
                         Column(
                             horizontalAlignment = Alignment.CenterHorizontally,
@@ -468,90 +566,55 @@ fun GameCombatScreen(
                             )
                         }
                     }
-                }
-            }
 
-            // =========================================================================
-            // RIGHT SIDE: MOVEMENT THUMBSTICK, SPRINT, CROUCH & JUMP
-            // =========================================================================
-            Row(
-                modifier = Modifier
-                    .align(Alignment.BottomEnd)
-                    .padding(bottom = 2.dp),
-                verticalAlignment = Alignment.Bottom,
-                horizontalArrangement = Arrangement.spacedBy(10.dp)
-            ) {
-                // Tactical Stance & Agility Buttons on the Right Flank
-                Column(
-                    verticalArrangement = Arrangement.spacedBy(8.dp),
-                    horizontalAlignment = Alignment.CenterHorizontally
-                ) {
-                    Surface(
-                        onClick = { engine.triggerJump() },
-                        color = TacticalObsidian.copy(alpha = 0.78f),
-                        shape = CircleShape,
-                        border = BorderStroke(1.dp, TacticalBorder),
+                    // Hold-to-Fire Tactical Trigger (also tracks finger drag so you can aim while firing!)
+                    Box(
                         modifier = Modifier
-                            .size(48.dp)
-                            .testTag("right_jump_button")
+                            .size(78.dp)
+                            .clip(CircleShape)
+                            .background(CrimsonThreat.copy(alpha = 0.74f))
+                            .border(2.5.dp, AmberTactical, CircleShape)
+                            .pointerInput(Unit) {
+                                awaitEachGesture {
+                                    val down = awaitFirstDown(requireUnconsumed = false)
+                                    val pid = down.id
+                                    engine.inputFiring = true
+                                    try {
+                                        while (true) {
+                                            val event = awaitPointerEvent()
+                                            val change = event.changes.firstOrNull { it.id == pid } ?: break
+                                            if (!change.pressed) break
+                                            val delta = change.positionChange()
+                                            if (delta != Offset.Zero) {
+                                                engine.applyAimDelta(delta.x, delta.y)
+                                            }
+                                            change.consume()
+                                        }
+                                    } finally {
+                                        engine.inputFiring = false
+                                    }
+                                }
+                            }
+                            .testTag("right_fire_button"),
+                        contentAlignment = Alignment.Center
                     ) {
-                        Box(contentAlignment = Alignment.Center) {
-                            Icon(Icons.Filled.ArrowUpward, contentDescription = "Jump", tint = TextPrimary)
-                        }
-                    }
-
-                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        Surface(
-                            onClick = {
-                                engine.inputCrouch = !engine.inputCrouch
-                                if (engine.inputCrouch) engine.inputSprint = false
-                            },
-                            color = if (hud.isCrouching) AmberTactical.copy(alpha = 0.35f) else TacticalObsidian.copy(alpha = 0.78f),
-                            shape = CircleShape,
-                            border = BorderStroke(1.dp, if (hud.isCrouching) AmberTactical else TacticalBorder),
-                            modifier = Modifier
-                                .size(48.dp)
-                                .testTag("right_crouch_button")
-                        ) {
-                            Box(contentAlignment = Alignment.Center) {
-                                Icon(
-                                    Icons.Filled.South,
-                                    contentDescription = "Crouch",
-                                    tint = if (hud.isCrouching) AmberTactical else TextPrimary
-                                )
-                            }
-                        }
-
-                        Surface(
-                            onClick = {
-                                engine.inputSprint = !engine.inputSprint
-                                if (engine.inputSprint) engine.inputCrouch = false
-                            },
-                            color = if (hud.isSprinting) AmberTactical.copy(alpha = 0.35f) else TacticalObsidian.copy(alpha = 0.78f),
-                            shape = CircleShape,
-                            border = BorderStroke(1.dp, if (hud.isSprinting) AmberTactical else TacticalBorder),
-                            modifier = Modifier
-                                .size(48.dp)
-                                .testTag("right_sprint_button")
-                        ) {
-                            Box(contentAlignment = Alignment.Center) {
-                                Icon(
-                                    Icons.Filled.DirectionsRun,
-                                    contentDescription = "Sprint Lock",
-                                    tint = if (hud.isSprinting) AmberTactical else TextPrimary
-                                )
-                            }
+                        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                            Icon(
+                                Icons.Filled.MyLocation,
+                                contentDescription = "Fire Weapon",
+                                tint = TextPrimary,
+                                modifier = Modifier.size(26.dp)
+                            )
+                            Text(
+                                text = "FIRE",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = TextPrimary,
+                                fontSize = 9.sp,
+                                fontWeight = FontWeight.Bold
+                            )
                         }
                     }
                 }
-
-                // Right-Side Movement Joystick
-                MovementThumbstick(
-                    onMoveVectorChanged = { mx, my ->
-                        engine.inputMoveX = mx
-                        engine.inputMoveY = my
-                    }
-                )
             }
         }
 
@@ -614,7 +677,7 @@ fun GameCombatScreen(
                 ) {
                     Column(
                         modifier = Modifier
-                            .width(440.dp)
+                            .width(460.dp)
                             .padding(20.dp),
                         verticalArrangement = Arrangement.spacedBy(10.dp),
                         horizontalAlignment = Alignment.CenterHorizontally
@@ -625,7 +688,7 @@ fun GameCombatScreen(
                             color = AmberTactical
                         )
                         Text(
-                            text = "CONTROLS: Right Thumb = Move/Sprint/Crouch • Left Side = Aim/Fire/Weapons/Gear",
+                            text = "CONTROLS: Left Side = 360° Movement/Sprint/Crouch • Right Side = All-Angle Aim, Fire, Weapons & Gear",
                             style = MaterialTheme.typography.labelSmall,
                             color = TextSecondary
                         )
@@ -725,21 +788,25 @@ private fun TacticalGearChip(
 private fun CrosshairOverlay(
     isAds: Boolean,
     hitMarker: Boolean,
-    headshot: Boolean
+    headshot: Boolean,
+    hasTarget: Boolean
 ) {
-    Canvas(modifier = Modifier.size(52.dp)) {
+    Canvas(modifier = Modifier.size(56.dp)) {
         val cx = size.width * 0.5f
         val cy = size.height * 0.5f
         val gap = if (isAds) 4f else 10f
         val arm = if (isAds) 7f else 9f
-        val retColor = if (isAds) AmberTactical else Color.White.copy(alpha = 0.88f)
+        val retColor = when {
+            hasTarget -> CrimsonThreat
+            isAds -> AmberTactical
+            else -> Color.White.copy(alpha = 0.9f)
+        }
 
-        // Four crosshair ticks
-        drawLine(retColor, Offset(cx - gap - arm, cy), Offset(cx - gap, cy), strokeWidth = 2.2f)
-        drawLine(retColor, Offset(cx + gap, cy), Offset(cx + gap + arm, cy), strokeWidth = 2.2f)
-        drawLine(retColor, Offset(cx, cy - gap - arm), Offset(cx, cy - gap), strokeWidth = 2.2f)
-        drawLine(retColor, Offset(cx, cy + gap), Offset(cx, cy + gap + arm), strokeWidth = 2.2f)
-        drawCircle(AmberTactical, radius = 2.4f, center = Offset(cx, cy))
+        drawLine(retColor, Offset(cx - gap - arm, cy), Offset(cx - gap, cy), strokeWidth = 2.4f)
+        drawLine(retColor, Offset(cx + gap, cy), Offset(cx + gap + arm, cy), strokeWidth = 2.4f)
+        drawLine(retColor, Offset(cx, cy - gap - arm), Offset(cx, cy - gap), strokeWidth = 2.4f)
+        drawLine(retColor, Offset(cx, cy + gap), Offset(cx, cy + gap + arm), strokeWidth = 2.4f)
+        drawCircle(if (hasTarget) CrimsonThreat else AmberTactical, radius = 2.5f, center = Offset(cx, cy))
 
         if (hitMarker) {
             val hmCol = if (headshot) CrimsonThreat else Color.White

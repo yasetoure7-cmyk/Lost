@@ -10,12 +10,8 @@ import com.example.data.CameraPerspective
 import com.example.data.PlayerStance
 import com.example.data.TacticalGearType
 import com.example.data.WeaponType
-import java.nio.ByteBuffer
-import java.nio.ByteOrder
-import java.nio.FloatBuffer
 import javax.microedition.khronos.egl.EGLConfig
 import javax.microedition.khronos.opengles.GL10
-import kotlin.math.abs
 import kotlin.math.cos
 import kotlin.math.sin
 import kotlin.math.sqrt
@@ -39,7 +35,7 @@ class LostEarthGlRenderer(
     private var flashPosHandle = 0
     private var flashStrengthHandle = 0
 
-    private lateinit var cubeBuffer: FloatBuffer
+    private lateinit var meshes: GlMeshBuffers
     private lateinit var textures: TextureAtlas
     private lateinit var humanRenderer: HumanoidMeshRenderer
 
@@ -48,7 +44,6 @@ class LostEarthGlRenderer(
     private val vpMatrix = FloatArray(16)
     private val mvpMatrix = FloatArray(16)
     private val modelMatrix = FloatArray(16)
-    private val identityMatrix = FloatArray(16)
 
     private var screenWidth = 1280
     private var screenHeight = 720
@@ -77,10 +72,9 @@ class LostEarthGlRenderer(
         flashPosHandle = GLES20.glGetUniformLocation(program, "uFlashPos")
         flashStrengthHandle = GLES20.glGetUniformLocation(program, "uFlashStrength")
 
-        cubeBuffer = buildUnitCubeBuffer()
+        meshes = GlMeshBuffers()
         textures = TextureAtlas().apply { initTextures() }
-        humanRenderer = HumanoidMeshRenderer(::drawTexturedBox, textures)
-        Matrix.setIdentityM(identityMatrix, 0)
+        humanRenderer = HumanoidMeshRenderer(::drawShape, textures)
         lastFrameNs = System.nanoTime()
     }
 
@@ -105,9 +99,8 @@ class LostEarthGlRenderer(
         val targetFov = if (engine.inputAds) weapon.adsFov else 58f
         currentFov += (targetFov - currentFov) * (dt * 12f).coerceAtMost(1f)
         val aspect = screenWidth.toFloat() / screenHeight.toFloat()
-        Matrix.perspectiveM(projMatrix, 0, currentFov, aspect, 0.1f, 220f)
+        Matrix.perspectiveM(projMatrix, 0, currentFov, aspect, 0.1f, 260f)
 
-        // Compute Camera (First-Person vs Third-Person Over-the-Shoulder)
         val crouchY = if (engine.inputCrouch) 1.05f else 1.58f
         val lookDirX = -sin(engine.playerYaw) * cos(engine.playerPitch)
         val lookDirY = sin(engine.playerPitch)
@@ -127,33 +120,30 @@ class LostEarthGlRenderer(
             camX = engine.playerX
             camY = engine.playerY + crouchY + bob
             camZ = engine.playerZ
-            targetX = camX + lookDirX * 10f
-            targetY = camY + lookDirY * 10f + engine.recoilKick * 0.18f
-            targetZ = camZ + lookDirZ * 10f
+            targetX = camX + lookDirX * 12f
+            targetY = camY + lookDirY * 12f + engine.recoilKick * 0.18f
+            targetZ = camZ + lookDirZ * 12f
         } else {
             val rightX = cos(engine.playerYaw)
             val rightZ = -sin(engine.playerYaw)
             val shoulderOffset = if (engine.inputAds) 0.48f else 0.62f
-            val backDist = if (engine.inputAds) 2.0f else 3.35f
+            val backDist = if (engine.inputAds) 2.0f else 3.45f
+            val pivotY = engine.playerY + crouchY + 0.15f
             val desiredX = engine.playerX - lookDirX * backDist + rightX * shoulderOffset
-            val desiredY = (engine.playerY + crouchY + 0.55f - lookDirY * (backDist * 0.65f)).coerceAtLeast(0.45f)
+            val desiredY = (pivotY + 0.35f - lookDirY * backDist).coerceAtLeast(0.32f)
             val desiredZ = engine.playerZ - lookDirZ * backDist + rightZ * shoulderOffset
 
-            // Clamp camera against buildings so it never clips into walls
-            val clamped = clampCameraDistance(
-                engine.playerX,
-                engine.playerY + crouchY,
-                engine.playerZ,
-                desiredX,
-                desiredY,
-                desiredZ
+            // Stepped raycast camera clamp so looking up/down/360 never clips inside walls
+            val clamped = clampCameraRay(
+                engine.playerX, pivotY, engine.playerZ,
+                desiredX, desiredY, desiredZ
             )
             camX = clamped[0]
             camY = clamped[1]
             camZ = clamped[2]
-            targetX = engine.playerX + lookDirX * 14f + rightX * 0.25f
-            targetY = engine.playerY + crouchY + lookDirY * 14f + engine.recoilKick * 0.25f
-            targetZ = engine.playerZ + lookDirZ * 14f + rightZ * 0.25f
+            targetX = engine.playerX + lookDirX * 16f + rightX * 0.25f
+            targetY = pivotY + lookDirY * 16f + engine.recoilKick * 0.25f
+            targetZ = engine.playerZ + lookDirZ * 16f + rightZ * 0.25f
         }
 
         Matrix.setLookAtM(viewMatrix, 0, camX, camY, camZ, targetX, targetY, targetZ, 0f, 1f, 0f)
@@ -168,52 +158,63 @@ class LostEarthGlRenderer(
         )
         GLES20.glUniform1f(flashStrengthHandle, if (engine.muzzleFlashTimer > 0f) 1.0f else 0.0f)
 
-        bindCubeVertexAttribs()
+        // 0. Atmospheric Twilight Sky Dome (cull front faces since camera is inside sphere)
+        GLES20.glDisable(GLES20.GL_DEPTH_TEST)
+        GLES20.glCullFace(GLES20.GL_FRONT)
+        Matrix.setIdentityM(modelMatrix, 0)
+        Matrix.translateM(modelMatrix, 0, camX, camY - 12f, camZ)
+        Matrix.scaleM(modelMatrix, 0, 220f, 180f, 220f)
+        drawShape(MeshShape.SPHERE, modelMatrix, textures.whiteTex, 0xFF1A2636, 1f, 1f, 0.9f, 0f)
+        // Warm dusk sun halo on northwest horizon
+        Matrix.setIdentityM(modelMatrix, 0)
+        Matrix.translateM(modelMatrix, 0, camX + 68f, camY + 34f, camZ - 95f)
+        Matrix.scaleM(modelMatrix, 0, 14f, 14f, 14f)
+        drawShape(MeshShape.SPHERE, modelMatrix, textures.whiteTex, 0xFFF59E0B, 1f, 1f, 1.0f, 0f)
+        GLES20.glCullFace(GLES20.GL_BACK)
+        GLES20.glEnable(GLES20.GL_DEPTH_TEST)
 
         // 1. Ground Terrain Plane
         Matrix.setIdentityM(modelMatrix, 0)
         Matrix.translateM(modelMatrix, 0, 0f, -0.05f, 0f)
-        Matrix.scaleM(modelMatrix, 0, 240f, 0.1f, 240f)
-        drawTexturedBox(modelMatrix, textures.terrainTex, 0xFFA4A89A, 38f, 38f, 0f, 0.08f)
+        Matrix.scaleM(modelMatrix, 0, 260f, 0.1f, 260f)
+        drawShape(MeshShape.CUBE, modelMatrix, textures.terrainTex, 0xFFB0B5A6, 42f, 42f, 0f, 0.08f)
 
-        // 2. World Architecture & Props
+        // 2. World Architecture, Silos, Trees, Vehicles & Props
         for (box in engine.worldBoxes) {
             Matrix.setIdentityM(modelMatrix, 0)
             Matrix.translateM(modelMatrix, 0, box.x, box.y, box.z)
             Matrix.scaleM(modelMatrix, 0, box.sx, box.sy, box.sz)
             val (tex, tint, uvScale, emissive, spec) = when (box.material) {
-                MaterialKind.ASPHALT -> Tuple5(textures.asphaltTex, 0xFF9EA5AE, maxOf(box.sx, box.sz) * 0.25f, 0f, 0.25f)
-                MaterialKind.CONCRETE_RUIN -> Tuple5(textures.concreteTex, 0xFFB0B4BA, 2.2f, 0f, 0.15f)
-                MaterialKind.SKYSCRAPER_WINDOW -> Tuple5(textures.windowTex, 0xFFCBD2DC, 3.0f, 0.04f, 0.45f)
-                MaterialKind.RUST_METAL -> Tuple5(textures.metalTex, 0xFF7D6B5D, 1.5f, 0f, 0.55f)
-                MaterialKind.CONTAINER_BLUE -> Tuple5(textures.metalTex, 0xFF335D82, 1.8f, 0f, 0.45f)
-                MaterialKind.CONTAINER_RED -> Tuple5(textures.metalTex, 0xFF7D3431, 1.8f, 0f, 0.45f)
+                MaterialKind.ASPHALT -> Tuple5(textures.asphaltTex, 0xFF9EA5AE, maxOf(box.sx, box.sz) * 0.25f, 0f, 0.35f)
+                MaterialKind.CONCRETE_RUIN -> Tuple5(textures.concreteTex, 0xFFB4B8BF, 2.2f, 0f, 0.16f)
+                MaterialKind.SKYSCRAPER_WINDOW -> Tuple5(textures.windowTex, 0xFFD0D8E2, 3.0f, 0.05f, 0.5f)
+                MaterialKind.RUST_METAL -> Tuple5(textures.metalTex, 0xFF847061, 1.6f, 0f, 0.58f)
+                MaterialKind.CONTAINER_BLUE -> Tuple5(textures.metalTex, 0xFF335D82, 1.8f, 0f, 0.48f)
+                MaterialKind.CONTAINER_RED -> Tuple5(textures.metalTex, 0xFF823632, 1.8f, 0f, 0.48f)
                 MaterialKind.WOOD_TIMBER -> Tuple5(textures.woodTex, 0xFFBC9E7C, 1.8f, 0f, 0.12f)
                 MaterialKind.FOLIAGE -> Tuple5(textures.foliageTex, 0xFF5D7F4F, 1.5f, 0f, 0.05f)
                 MaterialKind.SANDBAG -> Tuple5(textures.fabricTex, 0xFFA39377, 2.0f, 0f, 0.08f)
-                MaterialKind.GLOW_AMBER -> Tuple5(textures.whiteTex, 0xFFF59E0B, 1f, 0.92f, 0f)
-                MaterialKind.GLOW_CYAN -> Tuple5(textures.whiteTex, 0xFF38BDF8, 1f, 0.95f, 0f)
-                MaterialKind.GLOW_CRIMSON -> Tuple5(textures.whiteTex, 0xFFEF4444, 1f, 0.95f, 0f)
+                MaterialKind.GLOW_AMBER -> Tuple5(textures.whiteTex, 0xFFF59E0B, 1f, 0.94f, 0f)
+                MaterialKind.GLOW_CYAN -> Tuple5(textures.whiteTex, 0xFF38BDF8, 1f, 0.96f, 0f)
+                MaterialKind.GLOW_CRIMSON -> Tuple5(textures.whiteTex, 0xFFEF4444, 1f, 0.96f, 0f)
             }
-            drawTexturedBox(modelMatrix, tex, tint, uvScale, uvScale, emissive, spec)
+            drawShape(box.shape, modelMatrix, tex, tint, uvScale, uvScale, emissive, spec)
         }
 
         // 3. Supply Crates & Outpost Beacon Rings
         for (crate in engine.crates) {
             if (crate.collected) continue
-            val pulse = 0.35f + 0.25f * sin(globalTime * 4f)
+            val pulse = 0.4f + 0.3f * sin(globalTime * 4f)
             Matrix.setIdentityM(modelMatrix, 0)
             Matrix.translateM(modelMatrix, 0, crate.x, 0.45f, crate.z)
             Matrix.scaleM(modelMatrix, 0, 1.15f, 0.9f, 0.85f)
-            drawTexturedBox(modelMatrix, textures.metalTex, 0xFF4C6B42, 1f, 1f, 0f, 0.5f)
-            // Glowing top latch
+            drawShape(MeshShape.CUBE, modelMatrix, textures.metalTex, 0xFF4C6B42, 1f, 1f, 0f, 0.5f)
             Matrix.setIdentityM(modelMatrix, 0)
             Matrix.translateM(modelMatrix, 0, crate.x, 0.94f, crate.z)
             Matrix.scaleM(modelMatrix, 0, 0.45f, 0.08f, 0.45f)
-            drawTexturedBox(modelMatrix, textures.whiteTex, 0xFFF59E0B, 1f, 1f, pulse, 0f)
+            drawShape(MeshShape.CUBE, modelMatrix, textures.whiteTex, 0xFFF59E0B, 1f, 1f, pulse, 0f)
         }
 
-        // Outpost perimeter markers
         for (op in engine.outposts) {
             val ringColor = if (op.captured) 0xFF22C55E else 0xFFF59E0B
             for (corner in 0 until 8) {
@@ -223,53 +224,40 @@ class LostEarthGlRenderer(
                 Matrix.setIdentityM(modelMatrix, 0)
                 Matrix.translateM(modelMatrix, 0, px, 0.22f, pz)
                 Matrix.scaleM(modelMatrix, 0, 0.35f, 0.35f, 0.35f)
-                drawTexturedBox(modelMatrix, textures.whiteTex, ringColor, 1f, 1f, 0.75f, 0f)
+                drawShape(MeshShape.SPHERE, modelMatrix, textures.whiteTex, ringColor, 1f, 1f, 0.8f, 0f)
             }
         }
 
-        // 4. Stranded Survivors (human allies waiting to be rescued)
+        // 4. Stranded Survivors
         for (surv in engine.survivors) {
             if (surv.rescued) continue
             humanRenderer.drawHumanSoldier(
-                x = surv.x,
-                y = 0f,
-                z = surv.z,
-                yawRad = surv.yaw,
-                pitchRad = 0f,
-                stance = PlayerStance.IDLE,
-                animPhase = globalTime * 1.8f,
-                loadout = ArmorLoadout(),
-                weapon = WeaponType.COMBAT_PISTOL,
-                recoilKick = 0f,
-                muzzleFlash = false,
-                isReloading = false,
-                reloadProgress = 0f,
+                x = surv.x, y = 0f, z = surv.z,
+                yawRad = surv.yaw, pitchRad = 0f,
+                stance = PlayerStance.IDLE, animPhase = globalTime * 1.8f,
+                loadout = ArmorLoadout(), weapon = WeaponType.COMBAT_PISTOL,
+                recoilKick = 0f, muzzleFlash = false,
+                isReloading = false, reloadProgress = 0f,
                 accentOverrideHex = 0xFF22C55E
             )
-            // Beacon diamond above survivor
             Matrix.setIdentityM(modelMatrix, 0)
             Matrix.translateM(modelMatrix, 0, surv.x, 2.35f + sin(globalTime * 3.5f) * 0.12f, surv.z)
             Matrix.rotateM(modelMatrix, 0, globalTime * 90f, 0f, 1f, 0f)
             Matrix.scaleM(modelMatrix, 0, 0.26f, 0.26f, 0.26f)
-            drawTexturedBox(modelMatrix, textures.whiteTex, 0xFF22C55E, 1f, 1f, 0.9f, 0f)
+            drawShape(MeshShape.SPHERE, modelMatrix, textures.whiteTex, 0xFF22C55E, 1f, 1f, 0.9f, 0f)
         }
 
         // 5. Warrior Squadmates
         for (sq in engine.squadmates) {
             humanRenderer.drawHumanSoldier(
-                x = sq.x,
-                y = 0f,
-                z = sq.z,
-                yawRad = sq.yaw,
-                pitchRad = 0f,
-                stance = sq.stance,
-                animPhase = sq.animPhase,
+                x = sq.x, y = 0f, z = sq.z,
+                yawRad = sq.yaw, pitchRad = 0f,
+                stance = sq.stance, animPhase = sq.animPhase,
                 loadout = ArmorLoadout(heavyPauldrons = true, tacticalPack = true),
                 weapon = sq.weapon,
                 recoilKick = if (sq.muzzleFlashTimer > 0f) 0.6f else 0f,
                 muzzleFlash = sq.muzzleFlashTimer > 0f,
-                isReloading = false,
-                reloadProgress = 0f,
+                isReloading = false, reloadProgress = 0f,
                 accentOverrideHex = sq.accentHex
             )
         }
@@ -279,20 +267,20 @@ class LostEarthGlRenderer(
             humanRenderer.drawZombie(zmb)
         }
 
-        // 7. Thrown Grenades & Particles & Bullet Tracers
+        // 7. Grenades, Particles, Bullet Tracers
         for (g in engine.grenades) {
             Matrix.setIdentityM(modelMatrix, 0)
             Matrix.translateM(modelMatrix, 0, g.x, g.y, g.z)
             Matrix.scaleM(modelMatrix, 0, 0.24f, 0.24f, 0.24f)
             val col = if (g.type == TacticalGearType.SHOCK_FLARE) 0xFF38BDF8 else 0xFFEF4444
-            drawTexturedBox(modelMatrix, textures.whiteTex, col, 1f, 1f, 0.9f, 0f)
+            drawShape(MeshShape.SPHERE, modelMatrix, textures.whiteTex, col, 1f, 1f, 0.9f, 0f)
         }
 
         for (p in engine.particles) {
             Matrix.setIdentityM(modelMatrix, 0)
             Matrix.translateM(modelMatrix, 0, p.x, p.y, p.z)
             Matrix.scaleM(modelMatrix, 0, p.size, p.size, p.size)
-            drawTexturedBox(modelMatrix, textures.whiteTex, p.colorHex, 1f, 1f, 0.9f, 0f)
+            drawShape(MeshShape.SPHERE, modelMatrix, textures.whiteTex, p.colorHex, 1f, 1f, 0.9f, 0f)
         }
 
         for (tr in engine.tracers) {
@@ -301,11 +289,16 @@ class LostEarthGlRenderer(
 
         // 8. Player Actor (3rd-Person) OR Weapon Viewmodel (1st-Person)
         if (engine.perspective == CameraPerspective.THIRD_PERSON) {
+            val shownYaw = if (engine.inputAds || engine.inputFiring || engine.muzzleFlashTimer > 0f) {
+                engine.playerYaw
+            } else {
+                engine.playerBodyYaw
+            }
             humanRenderer.drawHumanSoldier(
                 x = engine.playerX,
                 y = engine.playerY,
                 z = engine.playerZ,
-                yawRad = engine.playerYaw,
+                yawRad = shownYaw,
                 pitchRad = engine.playerPitch,
                 stance = engine.playerStance,
                 animPhase = engine.playerAnimPhase,
@@ -317,7 +310,6 @@ class LostEarthGlRenderer(
                 reloadProgress = if (engine.reloadDuration > 0f) 1f - (engine.reloadTimer / engine.reloadDuration) else 0f
             )
         } else {
-            // Switch vpMatrix to identity-view (eye-space) and clear depth for crisp viewmodel!
             GLES20.glClear(GLES20.GL_DEPTH_BUFFER_BIT)
             Matrix.perspectiveM(projMatrix, 0, 58f, aspect, 0.04f, 20f)
             System.arraycopy(projMatrix, 0, vpMatrix, 0, 16)
@@ -353,33 +345,48 @@ class LostEarthGlRenderer(
         Matrix.rotateM(modelMatrix, 0, yaw, 0f, 1f, 0f)
         Matrix.rotateM(modelMatrix, 0, pitch, 1f, 0f, 0f)
         Matrix.scaleM(modelMatrix, 0, 0.045f, 0.045f, len)
-        drawTexturedBox(modelMatrix, textures.whiteTex, tr.colorHex, 1f, 1f, 1.0f, 0f)
+        drawShape(MeshShape.CUBE, modelMatrix, textures.whiteTex, tr.colorHex, 1f, 1f, 1.0f, 0f)
     }
 
-    private fun clampCameraDistance(
+    private fun clampCameraRay(
         ox: Float, oy: Float, oz: Float,
         dx: Float, dy: Float, dz: Float
     ): FloatArray {
-        val vx = dx - ox
-        val vy = dy - oy
-        val vz = dz - oz
-        var minFraction = 1f
-        for (box in engine.worldBoxes) {
-            if (!box.collidable) continue
-            val minX = box.x - box.sx * 0.5f - 0.2f
-            val maxX = box.x + box.sx * 0.5f + 0.2f
-            val minY = box.y - box.sy * 0.5f - 0.2f
-            val maxY = box.y + box.sy * 0.5f + 0.2f
-            val minZ = box.z - box.sz * 0.5f - 0.2f
-            val maxZ = box.z + box.sz * 0.5f + 0.2f
-            if (dx in minX..maxX && dy in minY..maxY && dz in minZ..maxZ) {
-                minFraction = minOf(minFraction, 0.45f)
+        val steps = 8
+        var safeT = 1f
+        for (i in 1..steps) {
+            val t = i.toFloat() / steps
+            val px = ox + (dx - ox) * t
+            val py = oy + (dy - oy) * t
+            val pz = oz + (dz - oz) * t
+            var hit = false
+            for (box in engine.worldBoxes) {
+                if (!box.collidable) continue
+                val minX = box.x - box.sx * 0.5f - 0.25f
+                val maxX = box.x + box.sx * 0.5f + 0.25f
+                val minY = box.y - box.sy * 0.5f - 0.25f
+                val maxY = box.y + box.sy * 0.5f + 0.25f
+                val minZ = box.z - box.sz * 0.5f - 0.25f
+                val maxZ = box.z + box.sz * 0.5f + 0.25f
+                if (px in minX..maxX && py in minY..maxY && pz in minZ..maxZ) {
+                    hit = true
+                    break
+                }
+            }
+            if (hit) {
+                safeT = ((i - 1).toFloat() / steps).coerceAtLeast(0.22f)
+                break
             }
         }
-        return floatArrayOf(ox + vx * minFraction, oy + vy * minFraction, oz + vz * minFraction)
+        return floatArrayOf(
+            ox + (dx - ox) * safeT,
+            (oy + (dy - oy) * safeT).coerceAtLeast(0.28f),
+            oz + (dz - oz) * safeT
+        )
     }
 
-    private fun drawTexturedBox(
+    private fun drawShape(
+        shape: MeshShape,
         model: FloatArray,
         texId: Int,
         colorHex: Long,
@@ -388,6 +395,23 @@ class LostEarthGlRenderer(
         emissive: Float,
         specular: Float
     ) {
+        val (buf, count) = when (shape) {
+            MeshShape.CUBE -> meshes.cubeBuffer to meshes.cubeVertexCount
+            MeshShape.CYLINDER -> meshes.cylinderBuffer to meshes.cylinderVertexCount
+            MeshShape.CONE -> meshes.coneBuffer to meshes.coneVertexCount
+            MeshShape.SPHERE -> meshes.sphereBuffer to meshes.sphereVertexCount
+        }
+        val stride = 8 * 4
+        buf.position(0)
+        GLES20.glEnableVertexAttribArray(posHandle)
+        GLES20.glVertexAttribPointer(posHandle, 3, GLES20.GL_FLOAT, false, stride, buf)
+        buf.position(3)
+        GLES20.glEnableVertexAttribArray(normHandle)
+        GLES20.glVertexAttribPointer(normHandle, 3, GLES20.GL_FLOAT, false, stride, buf)
+        buf.position(6)
+        GLES20.glEnableVertexAttribArray(uvHandle)
+        GLES20.glVertexAttribPointer(uvHandle, 2, GLES20.GL_FLOAT, false, stride, buf)
+
         Matrix.multiplyMM(mvpMatrix, 0, vpMatrix, 0, model, 0)
         GLES20.glUniformMatrix4fv(mvpHandle, 1, false, mvpMatrix, 0)
         GLES20.glUniformMatrix4fv(modelHandle, 1, false, model, 0)
@@ -407,78 +431,12 @@ class LostEarthGlRenderer(
         GLES20.glUniform1f(emissiveHandle, emissive)
         GLES20.glUniform1f(specHandle, specular)
 
-        GLES20.glDrawArrays(GLES20.GL_TRIANGLES, 0, 36)
-    }
-
-    private fun bindCubeVertexAttribs() {
-        val stride = 8 * 4
-        cubeBuffer.position(0)
-        GLES20.glEnableVertexAttribArray(posHandle)
-        GLES20.glVertexAttribPointer(posHandle, 3, GLES20.GL_FLOAT, false, stride, cubeBuffer)
-
-        cubeBuffer.position(3)
-        GLES20.glEnableVertexAttribArray(normHandle)
-        GLES20.glVertexAttribPointer(normHandle, 3, GLES20.GL_FLOAT, false, stride, cubeBuffer)
-
-        cubeBuffer.position(6)
-        GLES20.glEnableVertexAttribArray(uvHandle)
-        GLES20.glVertexAttribPointer(uvHandle, 2, GLES20.GL_FLOAT, false, stride, cubeBuffer)
+        GLES20.glDrawArrays(GLES20.GL_TRIANGLES, 0, count)
     }
 
     private data class Tuple5<A, B, C, D, E>(val a: A, val b: B, val c: C, val d: D, val e: E)
 
     companion object {
-        fun buildUnitCubeBuffer(): FloatBuffer {
-            val v = floatArrayOf(
-                // Front (+Z)
-                -0.5f, -0.5f, 0.5f, 0f, 0f, 1f, 0f, 1f,
-                 0.5f, -0.5f, 0.5f, 0f, 0f, 1f, 1f, 1f,
-                 0.5f,  0.5f, 0.5f, 0f, 0f, 1f, 1f, 0f,
-                -0.5f, -0.5f, 0.5f, 0f, 0f, 1f, 0f, 1f,
-                 0.5f,  0.5f, 0.5f, 0f, 0f, 1f, 1f, 0f,
-                -0.5f,  0.5f, 0.5f, 0f, 0f, 1f, 0f, 0f,
-                // Back (-Z)
-                 0.5f, -0.5f, -0.5f, 0f, 0f, -1f, 0f, 1f,
-                -0.5f, -0.5f, -0.5f, 0f, 0f, -1f, 1f, 1f,
-                -0.5f,  0.5f, -0.5f, 0f, 0f, -1f, 1f, 0f,
-                 0.5f, -0.5f, -0.5f, 0f, 0f, -1f, 0f, 1f,
-                -0.5f,  0.5f, -0.5f, 0f, 0f, -1f, 1f, 0f,
-                 0.5f,  0.5f, -0.5f, 0f, 0f, -1f, 0f, 0f,
-                // Left (-X)
-                -0.5f, -0.5f, -0.5f, -1f, 0f, 0f, 0f, 1f,
-                -0.5f, -0.5f,  0.5f, -1f, 0f, 0f, 1f, 1f,
-                -0.5f,  0.5f,  0.5f, -1f, 0f, 0f, 1f, 0f,
-                -0.5f, -0.5f, -0.5f, -1f, 0f, 0f, 0f, 1f,
-                -0.5f,  0.5f,  0.5f, -1f, 0f, 0f, 1f, 0f,
-                -0.5f,  0.5f, -0.5f, -1f, 0f, 0f, 0f, 0f,
-                // Right (+X)
-                 0.5f, -0.5f,  0.5f, 1f, 0f, 0f, 0f, 1f,
-                 0.5f, -0.5f, -0.5f, 1f, 0f, 0f, 1f, 1f,
-                 0.5f,  0.5f, -0.5f, 1f, 0f, 0f, 1f, 0f,
-                 0.5f, -0.5f,  0.5f, 1f, 0f, 0f, 0f, 1f,
-                 0.5f,  0.5f, -0.5f, 1f, 0f, 0f, 1f, 0f,
-                 0.5f,  0.5f,  0.5f, 1f, 0f, 0f, 0f, 0f,
-                // Top (+Y)
-                -0.5f, 0.5f,  0.5f, 0f, 1f, 0f, 0f, 1f,
-                 0.5f, 0.5f,  0.5f, 0f, 1f, 0f, 1f, 1f,
-                 0.5f, 0.5f, -0.5f, 0f, 1f, 0f, 1f, 0f,
-                -0.5f, 0.5f,  0.5f, 0f, 1f, 0f, 0f, 1f,
-                 0.5f, 0.5f, -0.5f, 0f, 1f, 0f, 1f, 0f,
-                -0.5f, 0.5f, -0.5f, 0f, 1f, 0f, 0f, 0f,
-                // Bottom (-Y)
-                -0.5f, -0.5f, -0.5f, 0f, -1f, 0f, 0f, 1f,
-                 0.5f, -0.5f, -0.5f, 0f, -1f, 0f, 1f, 1f,
-                 0.5f, -0.5f,  0.5f, 0f, -1f, 0f, 1f, 0f,
-                -0.5f, -0.5f, -0.5f, 0f, -1f, 0f, 0f, 1f,
-                 0.5f, -0.5f,  0.5f, 0f, -1f, 0f, 1f, 0f,
-                -0.5f, -0.5f,  0.5f, 0f, -1f, 0f, 0f, 0f
-            )
-            return ByteBuffer.allocateDirect(v.size * 4)
-                .order(ByteOrder.nativeOrder())
-                .asFloatBuffer()
-                .apply { put(v); position(0) }
-        }
-
         fun buildShaderProgram(vsCode: String, fsCode: String): Int {
             val vs = compileShader(GLES20.GL_VERTEX_SHADER, vsCode)
             val fs = compileShader(GLES20.GL_FRAGMENT_SHADER, fsCode)
@@ -530,30 +488,27 @@ class LostEarthGlRenderer(
             void main() {
                 vec3 texSample = texture2D(uTex, vUv).rgb * uColor;
                 vec3 N = normalize(vNormal);
-                vec3 sunDir = normalize(vec3(0.45, 0.78, 0.42));
+                vec3 sunDir = normalize(vec3(0.45, 0.72, -0.52));
                 float ndl = max(dot(N, sunDir), 0.0);
-                vec3 skyAmb = mix(vec3(0.14, 0.16, 0.21), vec3(0.28, 0.34, 0.44), N.y * 0.5 + 0.5);
-                vec3 sunCol = vec3(1.0, 0.88, 0.72) * ndl * 0.92;
+                vec3 skyAmb = mix(vec3(0.14, 0.16, 0.21), vec3(0.32, 0.38, 0.48), N.y * 0.5 + 0.5);
+                vec3 sunCol = vec3(1.0, 0.86, 0.68) * ndl * 0.96;
 
-                // Muzzle flash dynamic point light
                 vec3 toFlash = uFlashPos - vWorldPos;
                 float flashDist = length(toFlash);
                 float flashAtten = uFlashStrength / (1.0 + 0.14 * flashDist * flashDist);
                 vec3 flashLight = vec3(1.0, 0.72, 0.28) * flashAtten * max(dot(N, normalize(toFlash)), 0.15);
 
-                // Blinn-Phong specular highlight
                 vec3 V = normalize(uCamPos - vWorldPos);
                 vec3 H = normalize(sunDir + V);
-                float specPow = pow(max(dot(N, H), 0.0), 24.0) * uSpec * ndl;
+                float specPow = pow(max(dot(N, H), 0.0), 28.0) * uSpec * ndl;
 
                 vec3 lit = texSample * (skyAmb + sunCol + flashLight) + vec3(specPow);
-                lit = mix(lit, texSample * 1.35, uEmissive);
+                lit = mix(lit, texSample * 1.32, uEmissive);
 
-                // Atmospheric twilight fog
                 float dist = length(uCamPos - vWorldPos);
-                float fog = clamp(1.0 - exp(-0.011 * dist), 0.0, 0.82);
-                vec3 fogColor = vec3(0.09, 0.12, 0.17);
-                vec3 finalCol = mix(lit, fogColor, fog * (1.0 - uEmissive * 0.8));
+                float fog = clamp(1.0 - exp(-0.0095 * dist), 0.0, 0.80);
+                vec3 fogColor = vec3(0.11, 0.14, 0.20);
+                vec3 finalCol = mix(lit, fogColor, fog * (1.0 - uEmissive * 0.82));
                 gl_FragColor = vec4(finalCol, 1.0);
             }
         """

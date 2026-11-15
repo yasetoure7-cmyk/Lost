@@ -72,7 +72,8 @@ data class WorldParticle(
     val size: Float,
     val colorHex: Long,
     var life: Float,
-    val maxLife: Float
+    val maxLife: Float,
+    val gravity: Float = 9.8f
 )
 
 data class ActiveGrenade(
@@ -138,6 +139,8 @@ data class HudState(
     val interactPrompt: String? = null,
     val activeOutpostName: String? = null,
     val activeOutpostProgress: Float = 0f,
+    val targetEnemyName: String? = null,
+    val targetEnemyHpFrac: Float = 0f,
     val radioSpeaker: String? = null,
     val radioMessage: String? = null,
     val mapBlips: List<MiniMapBlip> = emptyList(),
@@ -154,7 +157,6 @@ class GameEngine(
     private val soundEngine: TacticalSoundEngine,
     private val callbacks: GameEventCallbacks
 ) {
-    // World state
     var worldBoxes: List<WorldBox> = emptyList()
         private set
     val outposts = mutableListOf<WorldOutpost>()
@@ -166,14 +168,15 @@ class GameEngine(
     val particles = mutableListOf<WorldParticle>()
     val grenades = mutableListOf<ActiveGrenade>()
 
-    // Player simulation state (read directly by OpenGL thread)
+    // Player simulation state
     var playerX = 0f
     var playerY = 0f
     var playerZ = 44f
     var playerVy = 0f
     var onGround = true
-    var playerYaw = 0f // 0 looks toward -Z (North into ruined city)
-    var playerPitch = -0.06f
+    var playerYaw = 0f // Unrestricted 360-degree horizontal look
+    var playerPitch = -0.05f // Wide vertical look (-1.38..+1.38 rad, ~±79 deg)
+    var playerBodyYaw = 0f // Smooth directional stride orientation in 3rd-person
     var playerAnimPhase = 0f
     var playerStance = PlayerStance.IDLE
     var armorLoadout = ArmorLoadout()
@@ -210,7 +213,7 @@ class GameEngine(
     var isDowned = false
     var sessionKills = 0
 
-    // Touch input state (set from Compose UI thread)
+    // Touch input state (set from Compose multi-touch UI)
     @Volatile var inputMoveX = 0f
     @Volatile var inputMoveY = 0f
     @Volatile var inputSprint = false
@@ -229,6 +232,7 @@ class GameEngine(
     private var radioMessage: String? = null
     private var hudSyncAccum = 0f
     private var zombieSpawnTimer = 1.5f
+    private var atmosphereTimer = 0f
     private var nextZombieId = 1
     private var villageBonusArmor = 0
     private var villageMedCapacityBonus = 0
@@ -308,16 +312,16 @@ class GameEngine(
             playerY = 0f
             playerZ = 44f
             playerYaw = 0f
+            playerBodyYaw = 0f
             playerPitch = -0.05f
             isDowned = false
             sessionKills = 0
 
-            // Spawn initial threats in the ruined sectors
             spawnZoneHorde(WorldZone.ASHFALL_DOWNTOWN, 8)
             spawnZoneHorde(WorldZone.HARBOR_QUARANTINE, 7)
             spawnZoneHorde(WorldZone.BIOCORE_SPIRE, 8)
 
-            showRadio("SANCTUARY HQ", "Gate open. Secure city outposts, rescue survivors, and protect the squad.")
+            showRadio("SANCTUARY HQ", "Gate open. Left stick moves 360° • Right screen aims & fires.")
             pushHudSnapshot()
         }
     }
@@ -361,9 +365,14 @@ class GameEngine(
     }
 
     fun applyAimDelta(dx: Float, dy: Float) {
-        val sens = if (inputAds) 0.0022f else 0.0038f
+        val sens = if (inputAds) 0.0024f else 0.0042f
         playerYaw -= dx * sens
-        playerPitch = (playerPitch - dy * sens).coerceIn(-0.95f, 0.85f)
+        // Full 360° wrap to avoid precision drift while spinning continuously
+        val twoPi = (2.0 * PI).toFloat()
+        if (playerYaw > PI.toFloat()) playerYaw -= twoPi
+        if (playerYaw < -PI.toFloat()) playerYaw += twoPi
+        // Wide vertical look range (±79°) so user can look straight up at towers or down at ground
+        playerPitch = (playerPitch - dy * sens).coerceIn(-1.38f, 1.38f)
     }
 
     fun togglePerspective() {
@@ -401,6 +410,7 @@ class GameEngine(
             playerY = 0f
             playerZ = 54f
             playerYaw = 0f
+            playerBodyYaw = 0f
             health = maxHealth
             armor = maxArmor
             stamina = 1f
@@ -428,6 +438,7 @@ class GameEngine(
             updateZombies(dt)
             updateGrenades(dt)
             updateParticlesAndTracers(dt)
+            updateAtmosphereParticles(dt)
             updateDynamicSpawns(dt)
 
             hudSyncAccum += dt
@@ -506,31 +517,43 @@ class GameEngine(
         val rightZ = -sin(playerYaw)
 
         val rawMag = hypot(inputMoveX, inputMoveY)
-        val moving = rawMag > 0.08f
+        val moving = rawMag > 0.06f
         val wantSprint = moving && (inputSprint || rawMag > 0.88f) && !inputCrouch && !inputAds && stamina > 0.08f
 
         if (wantSprint) {
-            stamina = (stamina - dt * 0.22f).coerceAtLeast(0f)
+            stamina = (stamina - dt * 0.20f).coerceAtLeast(0f)
         } else {
-            stamina = (stamina + dt * 0.16f).coerceAtMost(1f)
+            stamina = (stamina + dt * 0.18f).coerceAtMost(1f)
         }
 
-        val baseSpeed = 5.4f * armorLoadout.vest.speedFactor
+        val baseSpeed = 5.6f * armorLoadout.vest.speedFactor
         val speed = when {
-            inputCrouch -> baseSpeed * 0.54f
-            inputAds -> baseSpeed * 0.62f
+            inputCrouch -> baseSpeed * 0.56f
+            inputAds -> baseSpeed * 0.65f
             wantSprint -> baseSpeed * 1.56f
             else -> baseSpeed
         }
 
-        val moveWorldX = (rightX * inputMoveX + forwardX * inputMoveY) * speed * dt
-        val moveWorldZ = (rightZ * inputMoveX + forwardZ * inputMoveY) * speed * dt
+        // True analog 360-degree movement relative to camera yaw
+        val normMag = rawMag.coerceAtMost(1f)
+        val dirX = if (moving) (rightX * inputMoveX + forwardX * inputMoveY) / rawMag else 0f
+        val dirZ = if (moving) (rightZ * inputMoveX + forwardZ * inputMoveY) / rawMag else 0f
+
+        val moveWorldX = dirX * normMag * speed * dt
+        val moveWorldZ = dirZ * normMag * speed * dt
 
         val resolved = resolveCircleCollision(playerX + moveWorldX, playerZ + moveWorldZ, 0.55f)
         playerX = resolved.first
         playerZ = resolved.second
 
-        // Gravity & Jump
+        // Smoothly orient actor body: face aim direction when shooting/ADS, or follow movement angle when sprinting/roaming
+        val desiredBodyYaw = if (moving && !inputAds && !inputFiring && muzzleFlashTimer <= 0f) {
+            atan2(-dirX, -dirZ)
+        } else {
+            playerYaw
+        }
+        playerBodyYaw = lerpAngle(playerBodyYaw, desiredBodyYaw, (dt * 12f).coerceAtMost(1f))
+
         if (!onGround) {
             playerVy -= 18.5f * dt
             playerY += playerVy * dt
@@ -550,11 +573,18 @@ class GameEngine(
         }
 
         if (moving) {
-            val rate = if (wantSprint) 11.5f else if (inputCrouch) 5.5f else 7.8f
-            playerAnimPhase += dt * rate
+            val rate = if (wantSprint) 11.5f else if (inputCrouch) 5.8f else 8.2f
+            playerAnimPhase += dt * rate * normMag.coerceAtLeast(0.45f)
         } else {
             playerAnimPhase += dt * 1.8f
         }
+    }
+
+    private fun lerpAngle(a: Float, b: Float, t: Float): Float {
+        var diff = (b - a) % (2f * PI.toFloat())
+        if (diff > PI.toFloat()) diff -= 2f * PI.toFloat()
+        if (diff < -PI.toFloat()) diff += 2f * PI.toFloat()
+        return a + diff * t
     }
 
     private fun updateWeaponAndFiring(dt: Float) {
@@ -571,7 +601,7 @@ class GameEngine(
 
         magAmmoMap[activeSlot] -= 1
         fireCooldown = weapon.fireRateMs / 1000f
-        muzzleFlashTimer = 0.065f
+        muzzleFlashTimer = 0.07f
         recoilKick = if (weapon == WeaponType.TACTICAL_SHOTGUN || weapon == WeaponType.MARKSMAN_SNIPER) 1f else 0.55f
         soundEngine.playGunshot(weapon)
 
@@ -580,9 +610,9 @@ class GameEngine(
         val dirY = sin(playerPitch)
         val dirZ = -cos(playerYaw) * cos(playerPitch)
 
-        val spreadRad = Math.toRadians((weapon.spreadDeg * if (inputAds) 0.3f else 1f).toDouble()).toFloat()
+        val spreadRad = Math.toRadians((weapon.spreadDeg * if (inputAds) 0.28f else 1f).toDouble()).toFloat()
         val muzzleX = playerX + dirX * 0.8f + cos(playerYaw) * 0.22f
-        val muzzleY = eyeY - 0.14f
+        val muzzleY = eyeY - 0.12f + dirY * 0.5f
         val muzzleZ = playerZ + dirZ * 0.8f - sin(playerYaw) * 0.22f
 
         repeat(weapon.pellets) {
@@ -611,10 +641,10 @@ class GameEngine(
 
             val hitZombie = hitResult.zombie
             if (hitZombie != null) {
-                val dmg = if (hitResult.headshot) (weapon.damage * 1.65f).toInt() else weapon.damage
+                val dmg = if (hitResult.headshot) (weapon.damage * 1.7f).toInt() else weapon.damage
                 damageZombie(hitZombie, dmg, hitResult.headshot, endX, endY, endZ)
             } else if (hitResult.hitWorld) {
-                spawnImpactSparks(endX, endY, endZ, 0xFFCBD5E1, 4)
+                spawnImpactSparks(endX, endY, endZ, 0xFFE2E8F0, 5)
             }
         }
     }
@@ -638,7 +668,6 @@ class GameEngine(
         var bestDist = maxDist
         var hitWorld = false
 
-        // Test world AABBs
         for (box in worldBoxes) {
             if (!box.collidable) continue
             val t = intersectRayBox(
@@ -654,13 +683,12 @@ class GameEngine(
             }
         }
 
-        // Test zombies (capsule/cylinder approximation)
         var bestZombie: ZombieActor? = null
         var bestHeadshot = false
         for (zmb in zombies) {
             if (zmb.dead) continue
-            val radius = 0.55f * zmb.type.scale
-            val height = 1.85f * zmb.type.scale
+            val radius = 0.58f * zmb.type.scale
+            val height = 1.9f * zmb.type.scale
             val ocX = zmb.x - originX
             val ocZ = zmb.z - originZ
             val proj = ocX * dirX + ocZ * dirZ
@@ -714,7 +742,7 @@ class GameEngine(
         hitMarkerTimer = 0.16f
         hitMarkerHeadshot = headshot
         soundEngine.playHitMarker(headshot)
-        spawnImpactSparks(hx, hy, hz, 0xFFDC2626, 7)
+        spawnImpactSparks(hx, hy, hz, 0xFFDC2626, 8)
 
         if (zmb.hp <= 0 && !zmb.dead) {
             zmb.dead = true
@@ -732,7 +760,6 @@ class GameEngine(
                 kills = 1,
                 xp = zmb.type.xpReward
             )
-            // Replenish a bit of active reserve on field drop
             if (ammoBonus > 0) {
                 val w = equippedWeapons[activeSlot]
                 reserveAmmoMap[activeSlot] = (reserveAmmoMap[activeSlot] + 8).coerceAtMost(w.maxReserve)
@@ -747,7 +774,6 @@ class GameEngine(
             if (sq.fireCooldown > 0f) sq.fireCooldown = (sq.fireCooldown - dt).coerceAtLeast(0f)
             if (sq.healCooldown > 0f) sq.healCooldown = (sq.healCooldown - dt).coerceAtLeast(0f)
 
-            // Medic ability for Dr. Maya Lin (PULSE)
             if (sq.callsign == "PULSE" && sq.healCooldown <= 0f && health < maxHealth) {
                 val distP = hypot(playerX - sq.x, playerZ - sq.z)
                 if (distP < 12f) {
@@ -757,7 +783,6 @@ class GameEngine(
                 }
             }
 
-            // Formation target behind/flanking player
             val angleOffset = ((idx - (count - 1) * 0.5f) * 1.0f) + PI.toFloat() * 0.85f
             val targetAngle = playerYaw + angleOffset
             val formX = playerX - sin(targetAngle) * 3.4f
@@ -782,7 +807,6 @@ class GameEngine(
                 sq.animPhase += dt * 1.6f
             }
 
-            // Engage nearest zombie in range
             val target = zombies.filter { !it.dead }.minByOrNull { hypot(it.x - sq.x, it.z - sq.z) }
             if (target != null) {
                 val tx = target.x - sq.x
@@ -831,7 +855,6 @@ class GameEngine(
             val dz = playerZ - zmb.z
             val dist = hypot(dx, dz)
 
-            // Keep zombies out of Sanctuary Valley safe inner yard unless player lures them right to gate
             val inSanctuarySafeCore = zmb.z > 37f && zmb.x in -24f..24f
             if (inSanctuarySafeCore) {
                 zmb.z -= dt * 3f
@@ -853,7 +876,6 @@ class GameEngine(
                     soundEngine.playZombieGrowl()
                 }
             } else {
-                // Idle wander
                 zmb.animPhase += dt * 1.4f
             }
         }
@@ -1033,10 +1055,50 @@ class GameEngine(
             p.x += p.vx * dt
             p.y += p.vy * dt
             p.z += p.vz * dt
-            p.vy -= 9.8f * dt
+            p.vy -= p.gravity * dt
             if (p.y < 0.05f) p.y = 0.05f
             p.life -= dt
             if (p.life <= 0f) pIt.remove()
+        }
+    }
+
+    private fun updateAtmosphereParticles(dt: Float) {
+        atmosphereTimer -= dt
+        if (atmosphereTimer > 0f || particles.size > 70) return
+        atmosphereTimer = 0.14f
+        // Sanctuary campfire embers & drifting city ash around player
+        if (hypot(playerX - 0f, playerZ - 60f) < 34f) {
+            particles.add(
+                WorldParticle(
+                    x = (Random.nextFloat() - 0.5f) * 1.0f,
+                    y = 0.9f,
+                    z = 60f + (Random.nextFloat() - 0.5f) * 1.0f,
+                    vx = (Random.nextFloat() - 0.5f) * 0.4f,
+                    vy = 1.6f + Random.nextFloat() * 1.2f,
+                    vz = (Random.nextFloat() - 0.5f) * 0.4f,
+                    size = 0.10f,
+                    colorHex = 0xFFF59E0B,
+                    life = 1.2f,
+                    maxLife = 1.2f,
+                    gravity = -0.3f
+                )
+            )
+        } else {
+            particles.add(
+                WorldParticle(
+                    x = playerX + (Random.nextFloat() - 0.5f) * 26f,
+                    y = 1.2f + Random.nextFloat() * 5f,
+                    z = playerZ + (Random.nextFloat() - 0.5f) * 26f,
+                    vx = 0.5f + Random.nextFloat() * 0.6f,
+                    vy = -0.25f,
+                    vz = (Random.nextFloat() - 0.5f) * 0.4f,
+                    size = 0.08f,
+                    colorHex = 0xFF94A3B8,
+                    life = 2.0f,
+                    maxLife = 2.0f,
+                    gravity = 0.05f
+                )
+            )
         }
     }
 
@@ -1145,6 +1207,14 @@ class GameEngine(
 
         val activeOp = outposts.firstOrNull { !it.captured && hypot(playerX - it.x, playerZ - it.z) <= 9.5f }
 
+        // Check enemy currently under crosshair for tactical target readout
+        val eyeY = playerY + if (inputCrouch) 1.05f else 1.58f
+        val dirX = -sin(playerYaw) * cos(playerPitch)
+        val dirY = sin(playerPitch)
+        val dirZ = -cos(playerYaw) * cos(playerPitch)
+        val aimScan = raycastCombatShot(playerX, eyeY, playerZ, dirX, dirY, dirZ, 75f)
+        val targetZombie = aimScan.zombie
+
         val blips = buildList {
             zombies.forEach { if (!it.dead) add(MiniMapBlip(it.x, it.z, BlipKind.ZOMBIE)) }
             squadmates.forEach { add(MiniMapBlip(it.x, it.z, BlipKind.SQUAD, it.callsign)) }
@@ -1195,6 +1265,8 @@ class GameEngine(
                 interactPrompt = interactText,
                 activeOutpostName = activeOp?.name,
                 activeOutpostProgress = activeOp?.progress ?: 0f,
+                targetEnemyName = targetZombie?.type?.displayName,
+                targetEnemyHpFrac = if (targetZombie != null) (targetZombie.hp.toFloat() / targetZombie.maxHp).coerceIn(0f, 1f) else 0f,
                 radioSpeaker = radioSpeaker,
                 radioMessage = radioMessage,
                 mapBlips = blips,
